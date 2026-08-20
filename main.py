@@ -61,11 +61,11 @@ def normalize_arabic(text: str) -> str:
 
 # --- إدارة قاعدة بيانات Turso ---
 
-async def get_db():
-    return libsql_client.create_client_async(url=TURSO_DB_URL, auth_token=TURSO_AUTH_TOKEN)
+def get_db():
+    return libsql_client.create_client(url=TURSO_DB_URL, auth_token=TURSO_AUTH_TOKEN)
 
 async def init_db():
-    async with await get_db() as db:
+    async with get_db() as db:
         await db.execute("""
             CREATE TABLE IF NOT EXISTS students (
                 chat_id INTEGER PRIMARY KEY,
@@ -77,7 +77,7 @@ async def init_db():
         """)
 
 async def save_student(chat_id: int, full_name: str, seat_number: str, year: str, major: str):
-    async with await get_db() as db:
+    async with get_db() as db:
         await db.execute(
             """
             INSERT INTO students (chat_id, full_name, seat_number, year, major)
@@ -92,12 +92,12 @@ async def save_student(chat_id: int, full_name: str, seat_number: str, year: str
         )
 
 async def get_student(chat_id: int):
-    async with await get_db() as db:
+    async with get_db() as db:
         rs = await db.execute("SELECT full_name, seat_number, year, major FROM students WHERE chat_id = ?;", (chat_id,))
         return rs.rows[0] if rs.rows else None
 
 async def get_students_by_target(year: str, major: str):
-    async with await get_db() as db:
+    async with get_db() as db:
         rs = await db.execute("SELECT chat_id, full_name, seat_number, year, major FROM students;")
         matched = []
         norm_target_year = normalize_arabic(year)
@@ -312,7 +312,6 @@ async def lifespan(app: FastAPI):
     await init_db()
     await bot.set_webhook(url=WEBHOOK_URL, drop_pending_updates=True)
     
-    # تشغيل Telethon دون تعليق السيرفر
     await user_client.connect()
     if not await user_client.is_user_authorized():
         print("❌ خطأ: كود SESSION_STRING غير صالح أو منتهي الصلاحية!")
