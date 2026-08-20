@@ -1,15 +1,13 @@
 """
 مراقبة قناة تيليجرام عبر Telethon، واستخراج النتائج وتوزيعها على الطلاب المسجلين
-استيراد هذه الوحدة يكفي لتسجيل المستمع (listener) على user_client.
 """
 import logging
 import os
 
-from telethon import events
+from telethon import events, TelegramClient
 
 from app import db
 from app.ai_extractor import extract_results_from_pdf
-from app.clients import user_client
 from app.config import TARGET_CHANNEL
 from app.state import notification_queue
 from app.utils import normalize_arabic
@@ -17,24 +15,27 @@ from app.utils import normalize_arabic
 logger = logging.getLogger(__name__)
 
 
-@user_client.on(events.NewMessage(chats=TARGET_CHANNEL))
-async def channel_listener(event):
-    if not event.file or not (event.file.name and event.file.name.lower().endswith(".pdf")):
-        return
+def setup_telethon_listener(client: TelegramClient):
+    """تسجيل مستمع الرسائل على كائن Telethon بعد إنشائه"""
 
-    file_name = event.file.name
-    logger.info("📥 تم رصد ملف جديد: %s", file_name)
-    temp_path = await event.download_media(file=f"temp_{file_name}")
-
-    try:
-        parsed_data = await extract_results_from_pdf(temp_path)
-        if parsed_data is None:
-            logger.error("تعذّر استخراج بيانات صالحة من الملف: %s", file_name)
+    @client.on(events.NewMessage(chats=TARGET_CHANNEL))
+    async def channel_listener(event):
+        if not event.file or not (event.file.name and event.file.name.lower().endswith(".pdf")):
             return
-        await dispatch_notifications(parsed_data)
-    finally:
-        if os.path.exists(temp_path):
-            os.remove(temp_path)
+
+        file_name = event.file.name
+        logger.info("📥 تم رصد ملف جديد: %s", file_name)
+        temp_path = await event.download_media(file=f"temp_{file_name}")
+
+        try:
+            parsed_data = await extract_results_from_pdf(temp_path)
+            if parsed_data is None:
+                logger.error("تعذّر استخراج بيانات صالحة من الملف: %s", file_name)
+                return
+            await dispatch_notifications(parsed_data)
+        finally:
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
 
 
 async def dispatch_notifications(parsed_data: dict):
