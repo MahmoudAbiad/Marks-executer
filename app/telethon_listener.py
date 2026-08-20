@@ -2,8 +2,6 @@
 مراقبة قناة تيليجرام عبر Telethon، واستخراج النتائج وتوزيعها على الطلاب المسجلين
 """
 import logging
-import os
-
 from telethon import events, TelegramClient
 
 from app import db
@@ -25,17 +23,19 @@ def setup_telethon_listener(client: TelegramClient):
 
         file_name = event.file.name
         logger.info("📥 تم رصد ملف جديد: %s", file_name)
-        temp_path = await event.download_media(file=f"temp_{file_name}")
 
-        try:
-            parsed_data = await extract_results_from_pdf(temp_path)
-            if parsed_data is None:
-                logger.error("تعذّر استخراج بيانات صالحة من الملف: %s", file_name)
-                return
-            await dispatch_notifications(parsed_data)
-        finally:
-            if os.path.exists(temp_path):
-                os.remove(temp_path)
+        # تحميل الملف مباشرة كـ bytes داخل الذاكرة (RAM) بدون حفظ على القرص
+        pdf_bytes = await event.download_media(file=bytes)
+        if not pdf_bytes:
+            logger.error("تعذّر تحميل محتوى الملف: %s", file_name)
+            return
+
+        parsed_data = await extract_results_from_pdf(pdf_bytes)
+        if parsed_data is None:
+            logger.error("تعذّر استخراج بيانات صالحة من الملف: %s", file_name)
+            return
+
+        await dispatch_notifications(parsed_data)
 
 
 async def dispatch_notifications(parsed_data: dict):

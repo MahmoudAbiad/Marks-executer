@@ -1,5 +1,5 @@
 """
-استخراج بيانات النتائج من ملفات PDF عبر Gemini
+استخراج بيانات النتائج من ملفات PDF عبر Gemini (غير متزامن ومن الذاكرة مباشرة)
 """
 import json
 import logging
@@ -31,17 +31,18 @@ EXTRACTION_PROMPT = """
 """
 
 
-async def extract_results_from_pdf(file_path: str) -> dict | None:
-    """يرفع ملف PDF إلى Gemini ويستخرج بيانات النتائج منه كـ dict.
+async def extract_results_from_pdf(pdf_bytes: bytes) -> dict | None:
+    """إرسال بايتات الـ PDF مباشرة إلى Gemini واستخراج JSON بدون حفظ على القرص.
 
-    يعيد None في حال فشل الاستخراج أو كان الرد غير صالح كـ JSON،
-    بدل أن يرمي استثناء يوقف باقي المعالجة.
+    يعيد None في حال فشل الاستخراج أو كان الرد غير صالح كـ JSON.
     """
     try:
-        uploaded_pdf = ai_client.files.upload(file=file_path)
-        response = ai_client.models.generate_content(
+        response = await ai_client.aio.models.generate_content(
             model=GEMINI_MODEL,
-            contents=[uploaded_pdf, EXTRACTION_PROMPT],
+            contents=[
+                genai_types.Part.from_bytes(data=pdf_bytes, mime_type="application/pdf"),
+                EXTRACTION_PROMPT
+            ],
             config=genai_types.GenerateContentConfig(response_mime_type="application/json")
         )
     except Exception as e:
