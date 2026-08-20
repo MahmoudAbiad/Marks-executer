@@ -76,7 +76,6 @@ async def _extract_chunk(pdf_chunk_bytes: bytes) -> dict | None:
             ],
             config=genai_types.GenerateContentConfig(
                 response_mime_type="application/json",
-                thinking_config=genai_types.ThinkingConfig(thinking_budget=0)
             )
         )
         return json.loads(response.text)
