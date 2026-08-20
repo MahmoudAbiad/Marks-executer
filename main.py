@@ -1,4 +1,5 @@
 import os
+import re
 import json
 import asyncio
 from contextlib import asynccontextmanager
@@ -7,6 +8,7 @@ from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import CommandStart
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from telethon import TelegramClient, events
+from telethon.sessions import StringSession
 from telethon.errors import FloodWaitError
 from google import genai
 from google.genai import types as genai_types
@@ -15,17 +17,21 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# --- الإعدادات والمتغيرات ---
+# --- المتغيرات البيئية ---
 API_ID = int(os.getenv("API_ID", "0"))
 API_HASH = os.getenv("API_HASH", "")
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
+SESSION_STRING = os.getenv("SESSION_STRING", "")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 TURSO_DB_URL = os.getenv("TURSO_DB_URL", "")
 TURSO_AUTH_TOKEN = os.getenv("TURSO_AUTH_TOKEN", "")
-TARGET_CHANNEL = os.getenv("TARGET_CHANNEL", "EnvironmentalTechnologyEng")
 
-# رابط الاستضافة الخاص بـ Render لتفعيل الويب هوك
-WEBHOOK_HOST = os.getenv("RENDER_EXTERNAL_URL", "https://your-app-name.onrender.com")
+# تنظيف معرّف القناة ليعمل مع Telethon
+raw_channel = os.getenv("TARGET_CHANNEL", "EnvironmentalTechnologyEng")
+TARGET_CHANNEL = raw_channel.replace("https://t.me/", "").replace("@", "").strip()
+
+# إعدادات الويب هوك
+WEBHOOK_HOST = os.getenv("RENDER_EXTERNAL_URL", "https://marks-executer.onrender.com").rstrip("/")
 WEBHOOK_PATH = f"/webhook/{BOT_TOKEN}"
 WEBHOOK_URL = f"{WEBHOOK_HOST}{WEBHOOK_PATH}"
 
@@ -33,7 +39,7 @@ WEBHOOK_URL = f"{WEBHOOK_HOST}{WEBHOOK_PATH}"
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 ai_client = genai.Client(api_key=GEMINI_API_KEY)
-user_client = TelegramClient("user_session", API_ID, API_HASH)
+user_client = TelegramClient(StringSession(SESSION_STRING), API_ID, API_HASH)
 
 notification_queue = asyncio.Queue()
 user_registration_flow = {}
@@ -41,7 +47,19 @@ user_registration_flow = {}
 YEARS = ["السنة الأولى", "السنة الثانية", "السنة الثالثة", "السنة الرابعة", "السنة الخامسة"]
 MAJORS = ["هندسة البيئة", "هندسة الأغذية", "هندسة المواد", "هندسة الأتمتة والتحكم"]
 
-# --- قاعدة بيانات Turso ---
+# --- دوال مساعدة لتطبيع النصوص العربية ---
+
+def normalize_arabic(text: str) -> str:
+    """توحيد رسم الحروف العربية لضمان دقة المطابقة"""
+    if not text:
+        return ""
+    text = re.sub(r"[إأآا]", "ا", text)
+    text = re.sub(r"ة", "ه", text)
+    text = re.sub(r"ى", "ي", text)
+    text = re.sub(r"[ًٌٍَُِّْـ]", "", text)
+    return text.strip().lower()
+
+# --- إدارة قاعدة بيانات Turso ---
 
 async def get_db():
     return libsql_client.create_client_async(url=TURSO_DB_URL, auth_token=TURSO_AUTH_TOKEN)
@@ -82,13 +100,23 @@ async def get_students_by_target(year: str, major: str):
     async with await get_db() as db:
         rs = await db.execute("SELECT chat_id, full_name, seat_number, year, major FROM students;")
         matched = []
+        norm_target_year = normalize_arabic(year)
+        norm_target_major = normalize_arabic(major)
+
         for r in rs.rows:
             st = {"chat_id": r[0], "full_name": r[1], "seat_number": str(r[2]), "year": r[3], "major": r[4]}
-            if (st["year"] in year or year in st["year"]) and (st["major"] in major or major in st["major"]):
+            norm_db_year = normalize_arabic(st["year"])
+            norm_db_major = normalize_arabic(st["major"])
+
+            # مطابقة ذكية مع تجنب النصوص الفارغة
+            year_match = bool(norm_target_year and (norm_target_year in norm_db_year or norm_db_year in norm_target_year))
+            major_match = bool(norm_target_major and (norm_target_major in norm_db_major or norm_db_major in norm_target_major))
+
+            if year_match and major_match:
                 matched.append(st)
         return matched
 
-# --- طابور الإرسال في الخلفية ---
+# --- نظام طابور الرسائل (Worker) ---
 
 async def message_worker():
     while True:
@@ -99,12 +127,15 @@ async def message_worker():
                 await bot.send_message(chat_id=chat_id, text=message_text, parse_mode="Markdown")
                 sent = True
                 await asyncio.sleep(0.05)
+            except FloodWaitError as e:
+                print(f"⚠️ ضغط إرسال: انتظار {e.seconds} ثانية")
+                await asyncio.sleep(e.seconds + 1)
             except Exception as e:
                 print(f"تعذر الإرسال للطالب {chat_id}: {e}")
                 sent = True
         notification_queue.task_done()
 
-# --- لوحات المفاتيح والأزرار ---
+# --- واجهة وأزرار البوت ---
 
 def main_keyboard():
     return InlineKeyboardMarkup(inline_keyboard=[
@@ -113,13 +144,12 @@ def main_keyboard():
         [InlineKeyboardButton(text="ℹ️ حول البوت", callback_data="about_bot")]
     ])
 
-# --- معالجات أحداث البوت (Aiogram) ---
-
 @dp.message(CommandStart())
 async def start_cmd(message: types.Message):
     await message.answer(
         "👋 **أهلاً بك في بوت نتائج كلية الهندسة التقنية!**\n\n"
-        "يعمل البوت بنظام Webhook فائق السرعة لمراقبة وإرسال نتائجك لحظياً.",
+        "يقوم البوت بمراقبة القناة تلقائياً واستخراج نتيجتك فور صدور الملف.\n"
+        "يرجى تسجيل بياناتك لتبدأ المراقبة:",
         reply_markup=main_keyboard(),
         parse_mode="Markdown"
     )
@@ -130,7 +160,7 @@ async def view_data_cb(query: types.CallbackQuery):
     if student:
         msg = f"👤 **الاسم:** {student[0]}\n🔢 **رقم الاكتتاب:** {student[1]}\n📅 **السنة:** {student[2]}\n🏛 **الاختصاص:** {student[3]}"
     else:
-        msg = "⚠️ لم تسجل بياناتك بعد. اضغط على تسجيل البيانات للبدء."
+        msg = "⚠️ لم تسجل بياناتك بعد. اضغط على الزر بالأسفل للبدء."
     await query.message.answer(msg, reply_markup=main_keyboard(), parse_mode="Markdown")
     await query.answer()
 
@@ -159,11 +189,16 @@ async def set_major_cb(query: types.CallbackQuery):
         data = user_registration_flow.pop(chat_id)
         await save_student(chat_id, data["full_name"], data["seat_number"], data["year"], major)
         await query.message.answer(
-            f"✅ **تم تسجيل بياناتك بنجاح!**\n\n"
+            f"✅ **تم تسجيل وتحديث بياناتك بنجاح!**\n\n"
             f"👤 **الاسم:** {data['full_name']}\n🔢 **الاكتتاب:** {data['seat_number']}\n📅 **السنة:** {data['year']}\n🏛 **الاختصاص:** {major}",
             reply_markup=main_keyboard(),
             parse_mode="Markdown"
         )
+    await query.answer()
+
+@dp.callback_query(F.data == "about_bot")
+async def about_cb(query: types.CallbackQuery):
+    await query.message.answer("🤖 نظام مؤتمت بالذكاء الاصطناعي لفحص واستخراج نتائج الامتحانات الجامعية فور صدورها.", reply_markup=main_keyboard())
     await query.answer()
 
 @dp.message()
@@ -181,28 +216,31 @@ async def text_input_handler(message: types.Message):
         else:
             await message.answer("⚠️ يرجى كتابة البيانات بالصيغة: `الاسم - رقم الاكتتاب`", parse_mode="Markdown")
 
-# --- مراقبة القناة ومعالجة ملفات PDF ---
+# --- مراقبة القناة واستخراج النتائج ---
 
 @user_client.on(events.NewMessage(chats=TARGET_CHANNEL))
 async def channel_listener(event):
     if not event.file or not (event.file.name and event.file.name.lower().endswith(".pdf")):
         return
 
-    temp_path = await event.download_media(file=f"temp_{event.file.name}")
+    file_name = event.file.name
+    print(f"📥 تم رصد ملف جديد: {file_name}")
+    temp_path = await event.download_media(file=f"temp_{file_name}")
+
     try:
         uploaded_pdf = ai_client.files.upload(file=temp_path)
         extraction_prompt = """
         حلل هذا المستند الامتحاني وأعد البيانات بصيغة JSON Object فقط:
         {
           "subject_name": "اسم المادة المكتوب بالترويسة",
-          "target_year": "السنة الدراسية (مثال: الأولى، الثانية...)",
-          "target_major": "الاختصاص (مثال: بيئة، أغذية...)",
+          "target_year": "السنة الدراسية (مثال: الأولى، الثانية، الثالثة...)",
+          "target_major": "الاختصاص (مثال: بيئة، أغذية، مواد، أتمتة...)",
           "students": [
             {
-              "seat_number": "رقم الاكتتاب",
+              "seat_number": "رقم الاكتتاب كنص",
               "full_name": "اسم الطالب والشهرة",
-              "practical_mark": "علامة العملي",
-              "theory_mark": "علامة النظري",
+              "practical_mark": "علامة العملي إن وجدت",
+              "theory_mark": "علامة النظري إن وجدت",
               "total_mark": "المحصلة النهائية رقماً",
               "status": "النتيجة (ناجح / راسب / غائب)"
             }
@@ -228,21 +266,31 @@ async def dispatch_notifications(parsed_data):
     major = parsed_data.get("target_major", "")
     results = parsed_data.get("students", [])
 
+    print(f"📊 معالجة: {subject} | السنة: {year} | الاختصاص: {major} | الطلاب: {len(results)}")
+
     students = await get_students_by_target(year, major)
     if not students:
+        print("ℹ️ لا يوجد طلاب مسجلين لهذه المادة.")
         return
 
-    results_map = {}
+    # فهرسة النتائج للبحث الفوري O(1)
+    seat_map = {}
+    name_map = {}
     for r in results:
         seat = str(r.get("seat_number", "")).strip()
-        name = str(r.get("full_name", "")).strip()
+        name = normalize_arabic(str(r.get("full_name", "")))
         if seat:
-            results_map[seat] = r
+            seat_map[seat] = r
         if name:
-            results_map[name] = r
+            name_map[name] = r
 
     for st in students:
-        match = results_map.get(st["seat_number"]) or results_map.get(st["full_name"])
+        target_seat = st["seat_number"].strip()
+        target_name = normalize_arabic(st["full_name"])
+
+        # المطابقة برقم الاكتتاب أولاً ثم بالاسم
+        match = seat_map.get(target_seat) or name_map.get(target_name)
+
         if match:
             msg = (
                 f"📢 **صدور نتيجة جديدة!**\n\n"
@@ -257,20 +305,25 @@ async def dispatch_notifications(parsed_data):
             )
             await notification_queue.put((st["chat_id"], msg))
 
-# --- خادم FastAPI ودورة حياة التطبيق (Lifespan) ---
+# --- تشغيل التطبيق وخادم FastAPI ---
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # بدء تشغيل قاعدة البيانات، الويب هوك، وعميل التلغرام
     await init_db()
     await bot.set_webhook(url=WEBHOOK_URL, drop_pending_updates=True)
-    await user_client.start()
+    
+    # تشغيل Telethon دون تعليق السيرفر
+    await user_client.connect()
+    if not await user_client.is_user_authorized():
+        print("❌ خطأ: كود SESSION_STRING غير صالح أو منتهي الصلاحية!")
+    else:
+        print("✅ تم تسجيل دخول حساب المراقبة (Telethon) بنجاح.")
+
     asyncio.create_task(message_worker())
-    print(f"🚀 تم تفعيل الويب هوك بنجاح على: {WEBHOOK_URL}")
+    print(f"🚀 تم تفعيل الويب هوك على: {WEBHOOK_URL}")
     
     yield
     
-    # الإغلاق الآمن
     await bot.delete_webhook()
     await user_client.disconnect()
     await bot.session.close()
@@ -280,8 +333,7 @@ app = FastAPI(lifespan=lifespan)
 @app.post(WEBHOOK_PATH)
 async def telegram_webhook(request: Request):
     update_data = await request.json()
-    update = types.Update(**update_data)
-    await dp.feed_update(bot=bot, update=update)
+    await dp.feed_raw_update(bot=bot, update=update_data)
     return Response(status_code=200)
 
 @app.get("/")
